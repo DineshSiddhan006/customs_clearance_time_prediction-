@@ -1,0 +1,8 @@
+1. inspection_track
+2. pre_arrival_filing_hours
+3. fatoorah_validation_passed
+4. weight_value_discrepancy
+5. historical_avg_clearance_hours
+6. is_aeo_certified
+7. visibility_meters
+8. ambient_temperature_celsius
