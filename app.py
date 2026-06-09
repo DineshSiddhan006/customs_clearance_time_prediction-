@@ -1,23 +1,15 @@
-# ==============================================================================
-# PRODUCTION INDUSTRIAL STREAMLIT APPLICATION: app.py
-# Use Case: Customs Clearance Time Prediction
-# Reference Standard: app(2).py Integration Mapping Suite
-# Execution: streamlit run app.py
-# ==============================================================================
-
 import streamlit as st
 import pandas as pd
 import numpy as np
-import joblib
-import catboost
-import plotly.express as px
-from datetime import datetime
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+import seaborn as sns
+from catboost import CatBoostRegressor  
 from sklearn.base import BaseEstimator, TransformerMixin
+import pickle
+import os
 import sys
 
-# ==============================================================================
-# STEP 1: DEFINE STRUCTURAL PREPROCESSOR BLUEPRINT FOR JOBLIB DESERIALIZATION
-# ==============================================================================
 class DynamicLogisticsPreprocessor(BaseEstimator, TransformerMixin):
     def __init__(self, categorical_threshold=10, target_col='clearance_duration_hours', drop_cols=None):
         self.categorical_threshold = categorical_threshold
@@ -78,44 +70,32 @@ class DynamicLogisticsPreprocessor(BaseEstimator, TransformerMixin):
 sys.modules['__main__'] = sys.modules[__name__]
 
 # ==============================================================================
-# STEP 2: LOAD PIPELINE ASSETS VIA JOBLIB CONTRACT
+# STEP 2: PIPELINE ASSET RECOVERY ENGINE
 # ==============================================================================
 @st.cache_resource
-def load_production_assets():
-    model_obj = joblib.load("winning_clearance_model.pkl")
-    prep_obj = joblib.load("custom_preprocessor_pipeline.pkl")
-    return model_obj, prep_obj
+def load_production_pipeline():
+    assets_dir = "deployed_assets"
+    preprocessor_path = os.path.join(assets_dir, "custom_preprocessor_pipeline.pkl")
+    model_path = os.path.join(assets_dir, "winning_clearance_model.pkl")
+    
+    with open(preprocessor_path, "rb") as f:
+        loaded_preprocessor = pickle.load(f)
+    with open(model_path, "rb") as f:
+        loaded_model = pickle.load(f)
+        
+    return loaded_preprocessor, loaded_model
 
-model, preprocessor = load_production_assets()
+@st.cache_data
+def load_eda_source_data():
+    return pd.read_csv("customs_clearance_train.csv")
 
-try:
-    test_data = pd.read_csv("customs_clearance_test.csv")
-except Exception:
-    test_data = pd.DataFrame()
+preprocessor, model = load_production_pipeline()
+raw_train_df = load_eda_source_data()
 
 # ==============================================================================
-# STEP 3: APPLICATION VISUAL STYLESHEET
+# STEP 3: APPLICATION UI AND CSS THEME CONFIGURATION
 # ==============================================================================
 st.set_page_config(page_title="Customs Clearance Time Prediction", layout="wide")
-
-st.markdown("""
-<style>
-.block-container {padding-top:1rem;}
-.main {background-color:#f5f7fb;}
-[data-testid="stMetric"]{
-    background:white;padding:20px;border-radius:18px;
-    border-top:5px solid #111827;
-}
-.result-box{
-    background:#dbeafe;padding:25px;border-radius:10px;
-    font-size:22px;font-weight:bold;color:#0b4aa2;
-}
-.result-box-danger{\n    background:#fee2e2;padding:25px;border-radius:10px;
-    font-size:22px;font-weight:bold;color:#b91c1c;
-}
-</style>
-""", unsafe_allow_html=True)
-
 st.title("Customs Clearance Time Prediction")
 st.markdown("---")
 
@@ -125,67 +105,127 @@ tab1, tab2 = st.tabs([
 ])
 
 # ==============================================================================
-# TAB 1: USER COMPUTE ENTRY INTERFACE
+# TAB 1: USER FORM ENTRY INTERFACE WITH COMPREHENSIVE TOOLTIPS
 # ==============================================================================
 with tab1:
     st.markdown("### Enter Live Flight Manifest Parameters")
     
     r1_c1, r1_c2 = st.columns(2)
     with r1_c1:
-        submission_date = st.date_input("Manifest Submission Date")
+        submission_date = st.date_input(
+            "Manifest Submission Date",
+            help="The scheduled calendar date the flight landing manifest details are logged into the terminal gateway."
+        )
     with r1_c2:
-        submission_time = st.time_input("Manifest Submission Time")
+        submission_time = st.time_input(
+            "Manifest Submission Time",
+            help="The exact operational timestamp when the arrival document entry queues open for processing."
+        )
         
-    r2_c1, r2_c2 = st.columns(2)
+    r2_c1, r2_c2, r2_c3 = st.columns([1, 1, 2])
     with r2_c1:
-        shc_code = st.selectbox("Special Handling Code (SHC)", options=["COL", "VAL", "GEN", "CRT", "PER"])
+        shc_code = st.selectbox(
+            "Special Handling Code (SHC)", 
+            options=["COL", "VAL", "GEN", "CRT", "PER"],
+            help="The special cargo class code indicating protective storage needs (e.g., Cold Chain, High-Value Tech)."
+        )
         
-        # Adaptive dropdown lookup rules
-        shc_to_hs_mapping = {
-            "PER": [60267540610, 40210100000],  
-            "COL": [30049000000, 40210100000],  
-            "CRT": [30049000000],               
-            "VAL": [85423100000],               
-            "GEN": [84713000000, 94032000000]   
+        shc_to_heading_mapping = {
+            "PER": ["0602", "0402"],  
+            "COL": ["3004", "0406"],  
+            "CRT": ["3004"],         
+            "VAL": ["8542"],         
+            "GEN": ["8471", "9403"]   
         }
-        available_hs_options = shc_to_hs_mapping[shc_code]
+        available_headings = shc_to_heading_mapping[shc_code]
         
     with r2_c2:
-        hs_code = st.selectbox("Saudi Tariff HS Code", options=available_hs_options)
+        hs_heading = st.selectbox(
+            "HS Heading (First 4 Digits)", 
+            options=available_headings,
+            help="The standardized international customs tariff heading category locked automatically based on your chosen SHC."
+        )
+    with r2_c3:
+        hs_extension = st.number_input(
+            "HS Code Extension (Remaining 8 Digits)", 
+            min_value=0, 
+            max_value=99999999, 
+            value=67540610, 
+            step=1,
+            format="%d",
+            help="The granular variable sub-heading item markers making up the rest of your full 12-digit commodity identification code."
+        )
+        full_hs_string = f"{hs_heading}{str(hs_extension).zfill(8)}"
+        st.caption(f"**Combined Full HS Code Passed to Model Matrix:** `{full_hs_string}`")
 
     r3_c1, r3_c2 = st.columns(2)
     with r3_c1:
-        port_loading = st.selectbox("Port of Loading Hub (IATA Airport)", options=["AMS", "BOM", "PVG", "TPE", "CDG", "FRA"])
+        port_loading = st.selectbox(
+            "Port of Loading Hub (IATA Airport)", 
+            options=["AMS", "BOM", "PVG", "TPE", "CDG", "FRA"],
+            help="The origin international airport location where the cargo containers were inspected and stowed on board."
+        )
         port_to_country = {"AMS": "NLD", "BOM": "IND", "PVG": "CHN", "TPE": "TWN", "CDG": "FRA", "FRA": "DEU"}
         origin_country = port_to_country[port_loading]
     with r3_c2:
-        hist_avg_hours = st.number_input("Historical 90-Day Clearance Avg (Hours)", value=60.27, step=0.1)
+        hist_avg_hours = st.number_input(
+            "Historical 90-Day Clearance Avg (Hours)", 
+            value=60.27, 
+            step=0.1, 
+            help="The long-term baseline moving average clearance delay recorded for this specific importing enterprise profile."
+        )
 
     r4_c1, r4_c2 = st.columns(2)
     with r4_c1:
-        fatoorah_passed = st.selectbox("ZATCA Fatoorah XML Validation Passed?", options=[1, 0], format_func=lambda x: "Yes" if x == 1 else "No")
+        fatoorah_passed = st.selectbox(
+            "ZATCA Fatoorah XML Validation Passed?", 
+            options=[1, 0], 
+            format_func=lambda x: "Yes" if x == 1 else "No",
+            help="Confirms if the cryptographic structure of the digital invoice successfully cleared automated pre-arrival validation."
+        )
     with r4_c2:
-        weight_discrepancy = st.slider("Physical vs Declared Weight Discrepancy Ratio", min_value=0.0, max_value=0.10, value=0.012, step=0.001)
+        weight_discrepancy = st.slider(
+            "Physical vs Declared Weight Discrepancy Ratio", 
+            min_value=0.0, 
+            max_value=0.10, 
+            value=0.012, 
+            step=0.001, 
+            help="The calculated weight variance between paper declarations and actual scales. Values over 0.05 trigger strict secondary inspection flags."
+        )
 
     r5_c1, r5_c2 = st.columns(2)
     with r5_c1:
-        pre_filing_hours = st.number_input("Pre-Arrival Filing Window (Hours before Landing)", value=12.57, step=0.1)
+        pre_filing_hours = st.number_input(
+            "Pre-Arrival Filing Window (Hours before Landing)", 
+            value=12.57, 
+            step=0.1,
+            help="The amount of hours before touchdown that the documentation was complete. Negative numbers mean late filings made post-landing."
+        )
     with r5_c2:
-        ambient_temp = st.number_input("Terminal Ambient Temperature (°C)", value=36.6, step=0.1)
+        ambient_temp = st.number_input(
+            "Terminal Ambient Temperature (°C)", 
+            value=36.6, 
+            step=0.1,
+            help="The real-time ambient thermal reading outside the air terminal hangar corridors."
+        )
 
     r6_c1 = st.columns(1)[0]
     with r6_c1:
-        visibility_meters = st.number_input("Meteorological Runway Visibility (Meters)", value=1368.0, step=10.0)
+        visibility_meters = st.number_input(
+            "Meteorological Runway Visibility (Meters)", 
+            value=1368.0, 
+            step=10.0, 
+            help="Runway sight range index. High parameters indicate clear skyways, while drop boundaries signal low visibility tarmac restrictions."
+        )
 
     st.markdown("---")
     
     if st.button("Compute Target Customs Dwell Time", use_container_width=True):
         time_string = f"{submission_date.strftime('%Y-%m-%d')}T{submission_time.strftime('%H:%M:%S')}+03:00"
         
-        # Build training-compliant background payload
         input_payload = pd.DataFrame({
             'submission_timestamp': [time_string],
-            'hs_code': [int(hs_code)],
+            'hs_code': [int(full_hs_string)],  
             'shc_code': [str(shc_code)],
             'origin_country': [str(origin_country)],
             'port_of_loading': [str(port_loading)],
@@ -213,7 +253,7 @@ with tab1:
             st.metric(
                 label="Predicted Operational Clearance Wait Time",
                 value=f"{predicted_dwell_hours_clipped:.2f} Hours",
-                delta="Uncertainty Interval Margin: ±12.71 Hours"
+                delta="High Precision Optimization Track Enabled"
             )
             
             if predicted_dwell_hours_clipped >= 72.0:
@@ -227,68 +267,184 @@ with tab1:
             st.error(f"Inference System Fault: {str(error)}")
 
 # ==============================================================================
-# TAB 2: EXPLORATORY DATA ANALYSIS (EDA HOOK LAYOUT FROM REFERENCE)
+# STEP 4: EXPLORATORY DATA ANALYSIS (HIGH-CONTRAST STATIC GRIDSPEC)
 # ==============================================================================
 with tab2:
-    if not test_data.empty:
+    eda_df = raw_train_df.copy()
+    
+    # FIXED HIGH CONTRAST TYPOGRAPHY CONFIGURATION Matrix
+    plt.style.use('default')
+    sns.set_theme(style="whitegrid", context="talk")
+    plt.rcParams.update({
+        'font.family': 'sans-serif',
+        'font.weight': 'bold',
+        'text.color': '#000000',          # Absolute dark text color
+        'axes.labelcolor': '#000000',     # Axis labels dark black
+        'xtick.color': '#000000',         # X ticks bold dark black
+        'ytick.color': '#000000',         # Y ticks bold dark black
+        'axes.titlecolor': '#000000',     # Subplot headers crisp black
+        'figure.facecolor': '#ffffff',    # Stark white frame context
+        'axes.facecolor': '#ffffff',      # Stark white background axes
+        'grid.color': '#E5E7EB',          # Light clean background mesh grid lines
+        'font.size': 13,
+        'axes.labelsize': 14,
+        'axes.titlesize': 15
+    })
+    
+    # ------------------------------------------------------------------
+    # CHART 1 HIERARCHY: HS CODES VS CLEARANCE DURATION
+    # ------------------------------------------------------------------
+    st.subheader("Chart 1")
+    fig_row1 = plt.figure(figsize=(24, 8))
+    gs1 = gridspec.GridSpec(1, 2, width_ratios=[1.2, 1.0])
+    
+    # Graph A
+    ax1 = fig_row1.add_subplot(gs1[0])
+    eda_df['hs_chapter'] = eda_df['hs_code'].astype(str).str.zfill(12).str[:2]
+    chapter_labels = {
+        '04': 'Ch.04: Dairy & Agro', '06': 'Ch.06: Live Plants',
+        '30': 'Ch.30: Pharma', '84': 'Ch.84: Industrial Machinery',
+        '85': 'Ch.85: Tech & Electronics', '94': 'Ch.94: General Commodities'
+    }
+    eda_df['hs_chapter_named'] = eda_df['hs_chapter'].map(chapter_labels).fillna(eda_df['hs_chapter'].apply(lambda x: f"Ch.{x}: Other Cargo"))
+    chapter_medians = eda_df.groupby('hs_chapter_named')['clearance_duration_hours'].median().sort_values(ascending=False).reset_index()
+    sns.barplot(ax=ax1, data=chapter_medians, y='hs_chapter_named', x='clearance_duration_hours', color='#438a5e')
+    ax1.set_title("Graph A: HS Code Chapter vs Clearance Duration", weight='bold', pad=15)
+    ax1.set_xlabel("Clearance Duration (Hours)", weight='bold')
+    ax1.set_ylabel("HS Chapter Classification", weight='bold')
+    ax1.set_xlim(0, 70)
+    for i, v in enumerate(chapter_medians['clearance_duration_hours']):
+        ax1.text(v + 1, i, f"{v:.1f}h", va='center', ha='left', fontsize=12, weight='bold', color='#000000')
         
-        # ------------------------------------------------------------------
-        # CHART 1
-        # ------------------------------------------------------------------
-        st.subheader("Chart 1")
-        c1, c2 = st.columns(2)
+    # Graph B
+    ax2 = fig_row1.add_subplot(gs1[1])
+    eda_df['hs_heading'] = eda_df['hs_code'].astype(str).str.zfill(12).str[:4]
+    heading_medians = eda_df.groupby('hs_heading')['clearance_duration_hours'].median().sort_values(ascending=False).head(10).reset_index()
+    sns.barplot(ax=ax2, data=heading_medians, y='hs_heading', x='clearance_duration_hours', hue='hs_heading', palette="YlOrRd_r", legend=False)
+    ax2.set_title("Graph B: Top 10 High-Delay HS Headings vs Clearance Duration", weight='bold', pad=15)
+    ax2.set_xlabel("Clearance Duration (Hours)", weight='bold')
+    ax2.set_ylabel("HS Heading Category Code", weight='bold')
+    ax2.set_xlim(0, 70)
+    for i, v in enumerate(heading_medians['clearance_duration_hours']):
+        ax2.text(v + 1, i, f"{v:.1f}h", va='center', ha='left', fontsize=12, weight='bold', color='#000000')
         
-        with c1:
-            fig1_a = px.box(
-                test_data,
-                x="inspection_track",
-                y="clearance_duration_hours",
-                title="Graph A: Inspection Track vs Clearance Time"
-            )
-            st.plotly_chart(fig1_a, use_container_width=True)
-            
-        with c2:
-            country_group = test_data.groupby("origin_country")["clearance_duration_hours"].mean().reset_index()
-            country_group = country_group.sort_values("clearance_duration_hours", ascending=False).head(10)
-            fig1_b = px.bar(
-                country_group,
-                x="origin_country",
-                y="clearance_duration_hours",
-                title="Graph B: Origin Country Analytics"
-            )
-            st.plotly_chart(fig1_b, use_container_width=True)
+    sns.despine()
+    plt.tight_layout()
+    st.pyplot(fig_row1, transparent=False)
+    plt.close()
+    st.markdown("---")
 
-        # ------------------------------------------------------------------
-        # CHART 2
-        # ------------------------------------------------------------------
-        st.subheader("Chart 2")
-        c3, c4, c5 = st.columns(3)
+    # ------------------------------------------------------------------
+    # CHART 2 HIERARCHY: INTERNATIONAL FREIGHT LANE ANALYSIS
+    # ------------------------------------------------------------------
+    st.subheader("Chart 2")
+    fig_row2 = plt.figure(figsize=(24, 8))
+    gs2 = gridspec.GridSpec(1, 2)
+    
+    # Graph A
+    ax3 = fig_row2.add_subplot(gs2[0])
+    country_labels = {
+        'IND': 'India (IND)', 'DEU': 'Germany (DEU)', 'NLD': 'Netherlands (NLD)',
+        'FRA': 'France (FRA)', 'TWN': 'Taiwan (TWN)', 'CHN': 'China (CHN)'
+    }
+    eda_df['origin_country_named'] = eda_df['origin_country'].map(country_labels).fillna(eda_df['origin_country'])
+    country_medians = eda_df.groupby('origin_country_named')['clearance_duration_hours'].median().sort_values(ascending=False).reset_index()
+    sns.barplot(ax=ax3, data=country_medians, y='origin_country_named', x='clearance_duration_hours', color='#1e3d59')
+    ax3.set_title("Graph A: Country of Origin vs Clearance Duration", weight='bold', pad=15)
+    ax3.set_xlabel("Clearance Duration (Hours)", weight='bold')
+    ax3.set_ylabel("Country of Origin", weight='bold')
+    ax3.set_xlim(0, 70)
+    for i, v in enumerate(country_medians['clearance_duration_hours']):
+        ax3.text(v + 1, i, f"{v:.1f}h", va='center', ha='left', fontsize=12, weight='bold', color='#000000')
         
-        with c3:
-            fig2_a = px.box(
-                test_data,
-                x="fatoorah_validation_passed",
-                y="clearance_duration_hours",
-                title="Graph A: Fatoorah Impact"
-            )
-            st.plotly_chart(fig2_a, use_container_width=True)
-            
-        with c4:
-            fig2_b = px.box(
-                test_data,
-                x="is_aeo_certified",
-                y="clearance_duration_hours",
-                title="Graph B: AEO Performance"
-            )
-            st.plotly_chart(fig2_b, use_container_width=True)
-            
-        with c5:
-            fig2_c = px.scatter(
-                test_data,
-                x="historical_avg_clearance_hours",
-                y="clearance_duration_hours",
-                title="Graph C: Historical vs Actual"
-            )
-            st.plotly_chart(fig2_c, use_container_width=True)
-    else:
-        st.info("Exploratory data analysis plots are disabled because 'customs_clearance_test.csv' is missing.")
+    # Graph B
+    ax4 = fig_row2.add_subplot(gs2[1])
+    port_medians = eda_df.groupby('port_of_loading')['clearance_duration_hours'].median().sort_values(ascending=False).reset_index()
+    sns.barplot(ax=ax4, data=port_medians, y='port_of_loading', x='clearance_duration_hours', palette="Blues_r", hue='port_of_loading', legend=False)
+    ax4.set_title("Graph B: Departure Port vs Clearance Duration", weight='bold', pad=15)
+    ax4.set_xlabel("Clearance Duration (Hours)", weight='bold')
+    ax4.set_ylabel("Port of Loading Airport Code", weight='bold')
+    ax4.set_xlim(0, 70)
+    for i, v in enumerate(port_medians['clearance_duration_hours']):
+        ax4.text(v + 1, i, f"{v:.1f}h", va='center', ha='left', fontsize=12, weight='bold', color='#000000')
+        
+    sns.despine()
+    plt.tight_layout()
+    st.pyplot(fig_row2, transparent=False)
+    plt.close()
+    st.markdown("---")
+
+    # ------------------------------------------------------------------
+    # CHART 3 HIERARCHY: REGULATORY PROGRAM EFFECTIVENESS
+    # ------------------------------------------------------------------
+    st.subheader("Chart 3")
+    fig_row3 = plt.figure(figsize=(24, 8))
+    gs3 = gridspec.GridSpec(1, 2)
+    
+    # Graph A
+    ax5 = fig_row3.add_subplot(gs3[0])
+    aeo_map = {1: "Gold Tier AEO Certified (1)", 0: "Standard Importer (0)"}
+    eda_df['aeo_status_named'] = eda_df['is_aeo_certified'].map(aeo_map)
+    aeo_colors = {"Gold Tier AEO Certified (1)": "#2ec4b6", "Standard Importer (0)": "#1e3d59"}
+    sns.boxplot(ax=ax5, data=eda_df, y='aeo_status_named', x='clearance_duration_hours', hue='aeo_status_named', palette=aeo_colors, width=0.4, showfliers=False, legend=False)
+    ax5.set_title("Graph A: Authorized Economic Operator (AEO) Status vs Clearance Duration", weight='bold', pad=15)
+    ax5.set_xlabel("Clearance Duration (Hours)", weight='bold')
+    ax5.set_ylabel("Importer Profile", weight='bold')
+    ax5.set_xlim(0, 70)
+    for tick, label in enumerate(eda_df['aeo_status_named'].unique()):
+        median_val = eda_df[eda_df['aeo_status_named'] == label]['clearance_duration_hours'].median()
+        ax5.text(median_val, tick - 0.28, f"Median: {median_val:.1f}h", ha='center', va='bottom', fontsize=12, weight='bold', color='#000000')
+        
+    # Graph B
+    ax6 = fig_row3.add_subplot(gs3[1])
+    fatoorah_map = {1: "ZATCA Compliant XML E-Invoice (1)", 0: "Legacy PDF/Manual Manifest (0)"}
+    eda_df['fatoorah_status_named'] = eda_df['fatoorah_validation_passed'].map(fatoorah_map)
+    fatoorah_colors = {"ZATCA Compliant XML E-Invoice (1)": "#2ec4b6", "Legacy PDF/Manual Manifest (0)": "#e63946"}
+    sns.boxplot(ax=ax6, data=eda_df, y='fatoorah_status_named', x='clearance_duration_hours', hue='fatoorah_status_named', palette=fatoorah_colors, width=0.4, showfliers=False, legend=False)
+    ax6.set_title("Graph B: Digital E-Invoicing Gateway Validation vs Clearance Duration", weight='bold', pad=15)
+    ax6.set_xlabel("Clearance Duration (Hours)", weight='bold')
+    ax6.set_ylabel("Documentation Profile", weight='bold')
+    ax6.set_xlim(0, 70)
+    for tick, label in enumerate(eda_df['fatoorah_status_named'].unique()):
+        median_val = eda_df[eda_df['fatoorah_status_named'] == label]['clearance_duration_hours'].median()
+        ax6.text(median_val, tick - 0.28, f"Median: {median_val:.1f}h", ha='center', va='bottom', fontsize=12, weight='bold', color='#000000')
+        
+    sns.despine()
+    plt.tight_layout()
+    st.pyplot(fig_row3, transparent=False)
+    plt.close()
+    st.markdown("---")
+
+    # ------------------------------------------------------------------
+    # CHART 4 HIERARCHY: RISK THRESHOLDS AND PROFILE CORRELATIONS
+    # ------------------------------------------------------------------
+    st.subheader("Chart 4")
+    fig_row4 = plt.figure(figsize=(24, 8))
+    gs4 = gridspec.GridSpec(1, 2)
+    
+    # Graph A
+    ax7 = fig_row4.add_subplot(gs4[0])
+    sns.scatterplot(ax=ax7, data=eda_df, x='historical_avg_clearance_hours', y='clearance_duration_hours', alpha=0.5, color='#1e3d59', edgecolor='none')
+    sns.regplot(ax=ax7, data=eda_df, x='historical_avg_clearance_hours', y='clearance_duration_hours', scatter=False, color='#e63946', line_kws={"linewidth": 3.0, "linestyle": "--"})
+    ax7.set_title("Graph A: Historical 90-Day Importer Average vs Current Clearance Duration", weight='bold', pad=15)
+    ax7.set_xlabel("Historical 90-Day Rolling Clearance Mean (Hours)", weight='bold')
+    ax7.set_ylabel("Current Clearance Duration (Hours)", weight='bold')
+    ax7.set_xlim(0, 168)
+    ax7.set_ylim(0, 250)
+    
+    # Graph B
+    ax8 = fig_row4.add_subplot(gs4[1])
+    sns.scatterplot(ax=ax8, data=eda_df, x='weight_value_discrepancy', y='clearance_duration_hours', alpha=0.5, color='#1e3d59', edgecolor='none')
+    sns.regplot(ax=ax8, data=eda_df, x='weight_value_discrepancy', y='clearance_duration_hours', scatter=False, color='#e63946', line_kws={"linewidth": 3.0, "linestyle": "--"})
+    ax8.set_title("Graph B: Physical Weight Discrepancy Ratio vs Clearance Duration", weight='bold', pad=15)
+    ax8.set_xlabel("Weight Discrepancy Ratio (Percentage)", weight='bold')
+    ax8.set_ylabel("Clearance Duration (Hours)", weight='bold')
+    ax8.set_xlim(0, 0.10)
+    ax8.set_ylim(0, 250)
+    ax8.axvline(x=0.05, color='#e63946', linestyle=':', alpha=0.9, linewidth=2.5)
+    ax8.text(0.052, 220, "ZATCA 5% Fraud Alert Gate", color='#e63946', weight='bold', fontsize=12)
+    
+    sns.despine()
+    plt.tight_layout()
+    st.pyplot(fig_row4, transparent=False)
+    plt.close()
